@@ -160,10 +160,17 @@ struct DYNativeVideoActions: View {
     private var slotHeight: CGFloat {
         let minimum = railHeight + standaloneBottomClearance
         guard !anchorFrame.isEmpty else { return minimum }
-        let preferred = (availableBelowControls - 112 + standaloneBottomClearance).rounded(.down)
         let dockClearance: CGFloat = onBack == nil ? 90 : 66
+        // fork 改动（机主反馈）：普通 iPhone 横屏时右侧竖排操作栏偏上，占满可用高度并居中，
+        // 不再用下面 Duo 的「压缩 + 底对齐」算法。Duo 维持原样。
+        if !DYDuoMetrics.isDuoHardware {
+            return max(minimum, availableBelowControls - dockClearance)
+        }
+        let preferred = (availableBelowControls - 112 + standaloneBottomClearance).rounded(.down)
         return max(minimum, min(preferred, availableBelowControls - dockClearance))
     }
+    /// fork 改动：普通 iPhone 上操作栏在槽位内居中；Duo 维持原底对齐。
+    private var railAlignment: Alignment { DYDuoMetrics.isDuoHardware ? .bottom : .center }
 
     private var cleanButton: some View {
         Button(action: { if actions?.boost?.blocksTap != true { onToggleClean() } }) {
@@ -251,7 +258,7 @@ struct DYNativeVideoActions: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("douyin.video.actions")
                     .padding(.bottom, standaloneBottomClearance)
-                    .frame(height: slotHeight, alignment: .bottom)
+                    .frame(height: slotHeight, alignment: railAlignment)
                     .modifier(DYHoldBoostArea(control: actions.boost))
                 }
             }
