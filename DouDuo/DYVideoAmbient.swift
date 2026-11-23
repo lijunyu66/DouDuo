@@ -4,7 +4,8 @@ import CoreImage
 import UIKit
 
 /// 视频环境光：从正在播的 AVPlayerItem 取帧（AVPlayerItemVideoOutput），缩成 48px 宽、模糊后铺满背景再压暗。
-/// 主色保持黑，颜色跟着画面实时变（TikTok 式）。替代原来的「模糊封面」静态背景。
+/// 主色保持黑。原版颜色跟着画面实时变（TikTok 式）；本 fork 按机主要求改为：每个视频只取开头一帧定格，
+/// 播放期间背景不再实时变化、不闪烁（桌面投光 DYDeskLight 需要实时帧时仍照常取帧）。替代原来的「模糊封面」静态背景。
 /// 试过放弃的两条路（2026-11 Duo 真机实测）：
 /// - 同一个 AVPlayer 再挂第二个 AVPlayerLayer：第二层一直不出帧（isReadyForDisplay=false）。
 /// - 系统 UIBackgroundExtensionView：是把画面边缘镜像拉伸出去，出竖条色带，不是环境光。
@@ -29,6 +30,7 @@ struct DYAmbientBackdrop: UIViewRepresentable {
         v.dim = dim
         v.fillWidth = fillWidth
         v.active = active
+        v.refreshLink()
     }
 }
 
@@ -43,6 +45,8 @@ final class DYAmbientFrameView: UIView {
     private let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
     private weak var attachedItem: AVPlayerItem?
+    /// 已定格的 item：这个视频的环境光取过一帧就停，不再实时跟随画面（fork 改动）
+    private weak var frozenItem: AVPlayerItem?
     private var link: CADisplayLink?
     private static let ci = CIContext(options: [.cacheIntermediates: false])
     private static let queue = DispatchQueue(label: "douduo.ambient", qos: .utility)
@@ -89,10 +93,15 @@ final class DYAmbientFrameView: UIView {
         attachedItem = item
     }
 
+    /// SwiftUI 每次更新都同步一次：换了新视频（新 item）时能及时解除定格、取新帧
+    func refreshLink() { updateLink() }
+
     private func updateLink() {
         // 发热（serious 及以上）时停掉环境光取帧：背景留在最后一帧，不再每秒做图像处理（抖音同款发热降载）
         let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
-        if active && window != nil && !hot && !DDPerfExperiment.off("AMBIENT") {
+        // 当前视频已定格就不再取帧；桌面投光在用时除外（它需要实时帧）
+        let frozen = frozenItem != nil && frozenItem === player.currentItem && !DYDeskLightHub.wanted
+        if active && window != nil && !hot && !frozen && !DDPerfExperiment.off("AMBIENT") {
             guard link == nil else { return }
             let l = CADisplayLink(target: DYAmbientTick(self), selector: #selector(DYAmbientTick.tick))
             // 环境光不用 60 帧，12 帧左右看着就是连续的
@@ -145,6 +154,12 @@ final class DYAmbientFrameView: UIView {
                 guard let self else { return }
                 self.working = false
                 if let cg { self.imageView.image = UIImage(cgImage: cg) }
+                // fork 改动：本视频取到第一帧就定格，停掉取帧，背景不再实时闪烁（桌面投光在用时不停）
+                if cg != nil, !desk {
+                    self.frozenItem = item
+                    self.link?.invalidate()
+                    self.link = nil
+                }
                 if let proj { DYDeskLightHub.publish(proj.image, glow: proj.glow, aspect: aspect) }
                 if self.imageView.alpha == 0, cg != nil {
                     UIView.animate(withDuration: 0.25) { self.imageView.alpha = 1; self.dimView.alpha = 1 }
