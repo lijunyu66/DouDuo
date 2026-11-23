@@ -1,0 +1,36 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Fetch VLCKit binary
+        run: ./scripts/fetch-vlckit.sh
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project DouDuo.xcodeproj -scheme DouDuo -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/dd-build" \
+            build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+      - name: Package IPA
+        run: |
+          VER=$(grep -E '^ +MARKETING_VERSION:' project.yml | head -1 | awk '{print $2}')
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$RUNNER_TEMP/dd-build/Build/Products/Release-iphoneos/DouDuo.app" build/ipa/Payload/
+          (cd build/ipa && zip -qry "../DouDuo-$VER-unsigned.ipa" Payload)
+          echo "IPA=build/DouDuo-$VER-unsigned.ipa" >> "$GITHUB_ENV"
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouDuo-unsigned-ipa
+          path: ${{ env.IPA }}
+          if-no-files-found: error
