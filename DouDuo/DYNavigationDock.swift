@@ -8,6 +8,40 @@ enum DYMainTab: String, CaseIterable, Hashable {
     case mine = "我的", messages = "消息", home = "首页"
 }
 
+/// fork 改动（机主反馈，试验版）：普通 iPhone 横屏时右侧系统竖列（顶部按钮 + 操作栏 +「···」）
+/// 整体偏上，机主要求整列下移到贴底。系统列没有正规的位移接口，这里给 TabBarController
+/// 加一块顶部附加安全区把整列顶下来（按窗口高 22% 估算）。只在横屏生效、竖屏自动归零；
+/// 副作用：内容区顶部安全区同步变大，顶部栏会跟着下移——机主已知并同意先试一版。
+struct DYTabColumnDrop: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) { controller.apply() }
+    static func dismantleUIViewController(_ controller: Controller, coordinator: ()) { controller.restore() }
+
+    final class Controller: UIViewController {
+        private weak var appliedOn: UITabBarController?
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            apply()
+        }
+        override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+            super.viewWillTransition(to: size, with: coordinator)
+            coordinator.animate(alongsideTransition: nil) { [weak self] _ in self?.apply() }
+        }
+        func apply() {
+            guard !DYDuoMetrics.isDuoHardware, let tabs = tabBarController else { return }
+            if appliedOn !== tabs { restore() }
+            appliedOn = tabs
+            let size = tabs.view.bounds.size
+            let landscape = size.width > size.height && size.height > 0
+            tabs.additionalSafeAreaInsets.top = landscape ? (size.height * 0.22).rounded() : 0
+        }
+        func restore() {
+            if let appliedOn { appliedOn.additionalSafeAreaInsets.top = 0 }
+            appliedOn = nil
+        }
+    }
+}
+
 /// Reject Home reselection at the native tab controller, before the system
 /// can scroll the feed to the top. Keep SwiftUI's delegate for other events.
 /// 单击已选中的「首页」什么都不做（不让系统把推荐流拉回首条）；**双击**（0.4 秒内连点两下）= 刷新视频。
