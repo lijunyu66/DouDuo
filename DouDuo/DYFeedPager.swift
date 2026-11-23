@@ -70,8 +70,6 @@ struct DYFeedPager<Page: View>: View {
             else if id != currentID { scrollID = currentID }
         }
         .scrollIndicators(.hidden)
-        // fork 改动：横屏时把右侧系统竖列整体顶到贴底（实现见 DYNavigationDock 的 DYTabColumnDrop）
-        .background { DYTabColumnDrop().allowsHitTesting(false) }
         .ignoresSafeArea()
     }
 }
