@@ -1794,9 +1794,8 @@ struct DYUpstreamFeedScreen: DYRecommendFeedHost {
     @State private var myUser: DYUser?
     @State private var authorTarget: DYAweme.Author?
     @Environment(\.horizontalSizeClass) private var hSize
-    @Environment(\.verticalSizeClass) private var vSize
-    /// fork 改动：普通 iPhone 横屏（竖向紧凑）时右侧操作栏贴底；作者原布局把它抬高约 90pt。
-    private var railFlushBottom: Bool { vSize == .compact && !DYDuoMetrics.isDuoHardware }
+    /// fork 改动：普通 iPhone 上右侧操作栏贴底（横竖屏都要）；作者原布局把它抬高约 90pt。
+    private var railFlushBottom: Bool { !DYDuoMetrics.isDuoHardware }
     @State private var showMessages = false
     /// 从模块菜单「我的」打开信息页时直接停在「我的」
     @State private var messagesStartOnMine = false
@@ -2482,7 +2481,7 @@ struct DYUpstreamFeedScreen: DYRecommendFeedHost {
                     .frame(width: 54, height: railHeight, alignment: .top)
                     .modifier(DYRailReservedNudge(railEdge: edge, verticalSpace: (-max(0, geometry.size.height - railHeight - 92))...92))
                     .padding(.horizontal, outerPadding)
-                    // fork 改动：横屏贴底时把整列的 92pt 抬高去掉（机主要求移到最底部）
+                    // fork 改动：贴底时把整列的 92pt 抬高去掉（机主要求移到最底部）
                     .padding(.bottom, railFlushBottom ? 10 : 92)
                     .frame(maxWidth: .infinity, maxHeight: .infinity,
                            alignment: edge == .leading ? .bottomLeading : .bottomTrailing)
@@ -3978,9 +3977,8 @@ struct DYUpstreamVideoPage: View {
     @Environment(\.dyOfflineVideoPlayback) private var offlinePlayback
     private var usesOfflineFile: Bool { offlinePlayback?.inLibrary == true }
     @Environment(\.horizontalSizeClass) private var hSize
-    @Environment(\.verticalSizeClass) private var vSize
-    /// fork 改动：普通 iPhone 横屏（竖向紧凑）时右侧操作栏贴底；作者原布局把它抬高约 90pt。
-    private var railFlushBottom: Bool { vSize == .compact && !DYDuoMetrics.isDuoHardware }
+    /// fork 改动：普通 iPhone 上右侧操作栏贴底（横竖屏都要）；作者原布局把它抬高约 90pt。
+    private var railFlushBottom: Bool { !DYDuoMetrics.isDuoHardware }
     private var railWidth: CGFloat { hSize == .compact ? 50 : 54 }
     private var actionColumnWidth: CGFloat { 54 }
     private var chromeSidePadding: CGFloat { 12 }
@@ -4138,11 +4136,11 @@ struct DYUpstreamVideoPage: View {
                             opticalLeadingInset: theme.media.expandedRailOpticalInset))
                         .modifier(DYRailReservedNudge())
                         .offset(x: hSize == .compact ? -9 : 0)
-                        // fork 改动：横屏贴底时去掉操作栏的 56pt 抬高
+                        // fork 改动：贴底时去掉操作栏的 56pt 抬高
                         .padding(.bottom, item.images.isEmpty && !railFlushBottom ? 56 : 0)
                 }
                 .padding(.horizontal, chromeSidePadding)
-                // fork 改动：横屏贴底时底部额外留白 36 → 4
+                // fork 改动：贴底时底部额外留白 36 → 4
                 .padding(.bottom, max(insets.bottom, 18) + (item.images.isEmpty ? (railFlushBottom ? 4 : 36) : 24))
                 .opacity(boost.boosting ? 0 : 1)
                 .animation(.easeOut(duration: 0.15), value: boost.boosting)
@@ -4268,7 +4266,7 @@ struct DYUpstreamVideoPage: View {
                 actions(fg)
                     .fixedSize()
                     .modifier(DYRailReservedNudge(railEdge: edge))
-                    // fork 改动：横屏贴底时去掉操作栏的 56pt 抬高
+                    // fork 改动：贴底时去掉操作栏的 56pt 抬高
                     .padding(.bottom, item.images.isEmpty && !railFlushBottom ? 56 : 0)
             }
         }
