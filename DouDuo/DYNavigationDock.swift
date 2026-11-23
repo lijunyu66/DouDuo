@@ -161,18 +161,19 @@ struct DYNativeVideoActions: View {
         let minimum = railHeight + standaloneBottomClearance
         guard !anchorFrame.isEmpty else { return minimum }
         let dockClearance: CGFloat = onBack == nil ? 90 : 66
-        // fork 改动（机主反馈）：普通 iPhone 横屏时右侧竖排操作栏偏上，改为居中。
-        // 第一版用 availableBelowControls - dockClearance 当高度，被 railHeight 下限顶住、
-        // 框高约等于栏高，居中等于没生效（机主实测仍偏上）。改为让框占满整列高度再居中：
-        // 系统会把超高部分压回列内实际高度，内容自然落在整列中央。Duo 维持原算法。
+        // fork 改动（机主反馈）：普通 iPhone 横屏时右侧竖排操作栏偏上。第一版试过居中：
+        // 高度被 railHeight 下限顶住、框高约等于栏高，居中没生效（机主实测仍偏上）；
+        // 机主最终决定不要居中、直接贴底：框占满整列高度 + 底对齐（railAlignment），
+        // 系统会把超高部分压回列内实际高度，栏落在列的最底部。Duo 维持原算法。
         if !DYDuoMetrics.isDuoHardware {
             return max(minimum, windowHeight - 8)
         }
         let preferred = (availableBelowControls - 112 + standaloneBottomClearance).rounded(.down)
         return max(minimum, min(preferred, availableBelowControls - dockClearance))
     }
-    /// fork 改动：普通 iPhone 上操作栏在槽位内居中；Duo 维持原底对齐。
-    private var railAlignment: Alignment { DYDuoMetrics.isDuoHardware ? .bottom : .center }
+    /// fork 改动：普通 iPhone 上操作栏在占满整列的槽位内贴底（机主最终要求：不要居中，移到最底部）；
+    /// Duo 本来就是底对齐，两边一致。
+    private var railAlignment: Alignment { .bottom }
 
     private var cleanButton: some View {
         Button(action: { if actions?.boost?.blocksTap != true { onToggleClean() } }) {
