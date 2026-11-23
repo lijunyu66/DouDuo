@@ -161,10 +161,12 @@ struct DYNativeVideoActions: View {
         let minimum = railHeight + standaloneBottomClearance
         guard !anchorFrame.isEmpty else { return minimum }
         let dockClearance: CGFloat = onBack == nil ? 90 : 66
-        // fork 改动（机主反馈）：普通 iPhone 横屏时右侧竖排操作栏偏上，占满可用高度并居中，
-        // 不再用下面 Duo 的「压缩 + 底对齐」算法。Duo 维持原样。
+        // fork 改动（机主反馈）：普通 iPhone 横屏时右侧竖排操作栏偏上，改为居中。
+        // 第一版用 availableBelowControls - dockClearance 当高度，被 railHeight 下限顶住、
+        // 框高约等于栏高，居中等于没生效（机主实测仍偏上）。改为让框占满整列高度再居中：
+        // 系统会把超高部分压回列内实际高度，内容自然落在整列中央。Duo 维持原算法。
         if !DYDuoMetrics.isDuoHardware {
-            return max(minimum, availableBelowControls - dockClearance)
+            return max(minimum, windowHeight - 8)
         }
         let preferred = (availableBelowControls - 112 + standaloneBottomClearance).rounded(.down)
         return max(minimum, min(preferred, availableBelowControls - dockClearance))
