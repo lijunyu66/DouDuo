@@ -224,26 +224,29 @@ struct DYNativeVideoActions: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Group {
-                    if let onBack { standaloneControls(onBack) }
-                    else { cleanButton }
-                }
-                .background(DYToolbarFrameReader { frame, height in
-                    withTransaction(Transaction(animation: nil)) {
-                        anchorFrame = frame
-                        windowHeight = height
+            // fork 兼容补丁：xcode-27 预览镜像的 iOS 27 SDK 把 ToolbarContent.hidden 标为不可用，
+            // 改为条件包含（隐藏时不生成该项；锚点帧沿用上次测量值，作者原设计已依赖保留值）。
+            if !(onBack == nil ? actions == nil || showsInlineCleanControl : verticalEdge == nil) {
+                ToolbarItem(placement: .primaryAction) {
+                    Group {
+                        if let onBack { standaloneControls(onBack) }
+                        else { cleanButton }
                     }
-                })
+                    .background(DYToolbarFrameReader { frame, height in
+                        withTransaction(Transaction(animation: nil)) {
+                            anchorFrame = frame
+                            windowHeight = height
+                        }
+                    })
+                }
+                .axisBehavior(.verticalPreferred)
+                .visibilityPriority(.high)
             }
-            .axisBehavior(.verticalPreferred)
-            .visibilityPriority(.high)
-            .hidden(onBack == nil ? actions == nil || showsInlineCleanControl : verticalEdge == nil)
 
             // The stable controls anchor is independent of this group's size.
             // A new item identity invalidates the native cached fitting size.
             ToolbarItem(id: "video-actions-\(Int(slotHeight))-\(Int(standaloneBottomClearance))", placement: .bottomBar) {
-                if verticalEdge != nil, let actions {
+                if verticalEdge != nil, let actions, !isClean {
                     VStack(spacing: 4) {
                         DYAuthorAvatarControl(image: actions.avatarImage, name: actions.authorName,
                                               onAuthor: actions.onAuthor, follow: actions.follow)
@@ -265,7 +268,8 @@ struct DYNativeVideoActions: View {
             .sharedBackgroundVisibility(.hidden)
             .axisBehavior(.verticalPreferred)
             .visibilityPriority(.high)
-            .hidden(actions == nil || verticalEdge == nil || isClean)
+            // fork 兼容补丁：原 .hidden(actions == nil || verticalEdge == nil || isClean) 在预览 SDK 不可用，
+            // 条件已并入上方内容生成条件（actions/verticalEdge 不满足时内容本就不生成）。
         }
         // Retain the last measured slot across navigation and sheets.
     }
