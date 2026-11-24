@@ -48,6 +48,9 @@ final class DDAudioEngineHub {
     let engine = AVAudioEngine()
     let playerNode = AVAudioPlayerNode()
     let timePitch = AVAudioUnitTimePitch()
+    /// 变速增益补偿级（fork 新增）：TimePitch 变速后听感音量会变小，用 EQ 的 globalGain 按倍率补回。
+    /// 频段本身旁通、不改音色；1x 时增益为 0（且 1x 声音走原生音轨，引擎不参与）。
+    let gainEQ = AVAudioUnitEQ(numberOfBands: 1)
 
     private(set) var activeOwner: UUID?
     private var connectedFormat: AVAudioFormat?
@@ -58,9 +61,12 @@ final class DDAudioEngineHub {
     private init() {
         engine.attach(playerNode)
         engine.attach(timePitch)
+        engine.attach(gainEQ)
+        gainEQ.bands[0].bypass = true
+        gainEQ.globalGain = 0
         timePitch.rate = 1.0
         timePitch.pitch = 0.0
-        timePitch.overlap = 8.0
+        timePitch.overlap = 16.0
         installObservers()
     }
 
@@ -109,6 +115,7 @@ final class DDAudioEngineHub {
         activeOwner = owner
         reconnectGraph(format: format, force: false)
         timePitch.rate = max(0.25, min(4.0, rate))
+        updateGainCompensation()
         setMuted(muted, owner: owner)
         try ensureRunning()
     }
@@ -123,8 +130,10 @@ final class DDAudioEngineHub {
         if wasRunning { playerNode.stop() }
         engine.disconnectNodeOutput(playerNode)
         engine.disconnectNodeOutput(timePitch)
+        engine.disconnectNodeOutput(gainEQ)
         engine.connect(playerNode, to: timePitch, format: format)
-        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        engine.connect(timePitch, to: gainEQ, format: format)
+        engine.connect(gainEQ, to: engine.mainMixerNode, format: format)
         connectedFormat = format
         if wasRunning, !engine.isRunning {
             try? engine.start()
@@ -145,6 +154,13 @@ final class DDAudioEngineHub {
     func setRate(_ rate: Float, owner: UUID) {
         guard activeOwner == owner else { return }
         timePitch.rate = max(0.25, min(4.0, rate))
+        updateGainCompensation()
+    }
+
+    /// 按当前倍率更新变速增益补偿：偏离 1x 每差一倍约 +3.5dB，封顶 +5.5dB 防爆音；1x 时为 0
+    private func updateGainCompensation() {
+        let octaves = abs(log2(Double(max(0.25, min(4.0, timePitch.rate)))))
+        gainEQ.globalGain = Float(min(5.5, 3.5 * octaves))
     }
 
     func setMuted(_ muted: Bool, owner: UUID) {
