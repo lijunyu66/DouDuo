@@ -682,6 +682,13 @@ final class DDSeamlessController {
         targetRate = newRate
         switch mode {
         case .engaged:
+            // fork 修复（机主反馈）：变速交接进引擎的视频回到 1x 时，把声音还给原生音轨。
+            // 引擎的 TimePitch 在 1x 也会过一遍相位声码器，听感比原生声音明显小/闷，
+            // 表现为长按松手后音量变小；回原生后与长按前一致，之后再变速会重新交接。
+            if wantPlaying, engagedByHandoff, abs(newRate - 1.0) < 0.001,
+               returnToNativeAudio(reason: "rate-back-to-1x") {
+                return
+            }
             DDAudioEngineHub.shared.setRate(newRate, owner: ownerID)
             if wantPlaying { videoPlayer?.rate = newRate }
         case .preparing, .noAudio:
