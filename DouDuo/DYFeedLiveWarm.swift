@@ -124,6 +124,49 @@ final class DYFeedLiveWarm {
     }
     private static var retired: [Handle] = []
 
+    /// 离开直播：声音立刻拉到 0，真正停播往后挪这么久。（「立刻」现在是抬手那一刻，见 DYFeedLeaving）
+    /// 11-24 真机：停直播和下一条视频开播撞在同一刻时，缓冲够了的视频也要等 0.5–1.4 秒才起播（平时 0.03 秒）
+    static let stopDelay: TimeInterval = 0.6
+    private static var pendingStops: [ObjectIdentifier: DispatchWorkItem] = [:]
+    private static var lingering: [VLCPlayerController] = []
+
+    /// 预热接过来的那一路：先静音，0.6 秒后再停播回收
+    static func disposeLater(_ h: Handle) {
+        h.controller.onError = nil
+        silenceNow(h.controller)
+        DispatchQueue.main.asyncAfter(deadline: .now() + stopDelay) { dispose(h) }
+    }
+
+    /// 页面自己连的那一路：先静音，0.6 秒后再停播；停完再留 10 秒才放（同 dispose 的说明，防主线程析构卡死）
+    static func stopLater(_ c: VLCPlayerController) {
+        c.onError = nil
+        silenceNow(c)
+        let key = ObjectIdentifier(c)
+        pendingStops[key]?.cancel()
+        let work = DispatchWorkItem {
+            pendingStops[key] = nil
+            c.stop()
+            DDAudioSessionGate.noteVLCStopping()
+            lingering.append(c)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { lingering.removeAll { $0 === c } }
+        }
+        pendingStops[key] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + stopDelay, execute: work)
+    }
+
+    /// 划走那一刻就没声：只把音量拉到 0 不够——VLC 已把后面一两秒按原音量排进输出（蓝牙还要再晚一截），
+    /// 会接着响完（老板 11-24：「划到下个视频不会直接结束直播的声音」）。静音会停掉并清空音频输出，立刻无声。
+    static func silenceNow(_ c: VLCPlayerController) {
+        c.mediaPlayer.audio?.volume = 0
+        c.mediaPlayer.audio?.isMuted = true
+        DYLiveModel.log("DDLIVEAUDIO leave-mute vol=\(c.mediaPlayer.audio?.volume ?? -9) mute=\(c.mediaPlayer.audio?.isMuted == true ? 1 : 0)")
+    }
+
+    /// 0.6 秒内又划回这间直播：取消还没执行的停播（否则刚重新开播就被停掉）
+    static func cancelPendingStop(_ c: VLCPlayerController) {
+        pendingStops.removeValue(forKey: ObjectIdentifier(c))?.cancel()
+    }
+
     private static var window: UIWindow? {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows).first { $0.isKeyWindow }
@@ -167,4 +210,10 @@ struct DYFeedLiveVideo: View {
         .onAppear { if controller.videoSize.width > 0 { onFirstFrame() } }
         .onChange(of: controller.videoSize.width > 0) { _, has in if has { onFirstFrame() } }
     }
+}
+
+
+/// 竖滑抬手、确定要翻到别的条时发（比新条「停住」早约 0.2–0.3 秒）。userInfo: from / to（条目 id）
+enum DYFeedLeaving {
+    static let name = Notification.Name("DYFeedLeaving")
 }

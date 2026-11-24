@@ -18,9 +18,14 @@ enum DYStream {
     /// 设置里的「省流量模式」：用流量时降一档清晰度、只预热 1 条
     static let saverKey = "douyin_data_saver_v1"
 
+    /// 设置里的「Wi-Fi 省流量」（老板 11-24 新增，默认关）：开 = Wi-Fi 下也只下开头；关 = 按预缓存数量整条下
+    static let wifiSaverKey = "douyin_wifi_saver_v1"
+
     static var enabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+    /// 「蜂窝数据省流量」（沿用原「省流量模式」的键，默认开）
     static var saverOn: Bool { UserDefaults.standard.object(forKey: saverKey) as? Bool ?? true }
-    /// 省流量模式只在走蜂窝网络时生效
+    static var wifiSaverOn: Bool { UserDefaults.standard.object(forKey: wifiSaverKey) as? Bool ?? false }
+    /// 降一档清晰度 + 只预热下一条 + 不预连直播：只在「用流量且蜂窝省流量开」时
     static var saving: Bool { saverOn && DYNetPath.shared.cellular }
 
     static func url(for id: String) -> URL { URL(string: "\(scheme)://v/\(id)")! }
@@ -47,6 +52,36 @@ enum DYStream {
             return remote.isFileURL ? AVURLAsset(url: remote) : DYMedia.asset(remote)
         }
         return asset(for: item, remote: remote)
+    }
+}
+
+/// 流量策略（老板 11-24）：两个省流量开关 × 当前网络 → 清晰度 / 提前备几条 / 整条下几条
+/// - Wi-Fi 省流量关（默认）：按「预缓存数量」提前备好，并把这几条整条下好
+/// - Wi-Fi 省流量开：按「预缓存数量」提前备好，每条只下开头几秒，不播不继续下
+/// - 蜂窝省流量开（默认）：低一档清晰度，只备下一条的开头
+/// - 蜂窝省流量关：高清，提前备 2 条并整条下好
+enum DYNetPolicy {
+    struct Plan: Equatable {
+        let lowQuality: Bool
+        /// 提前建好播放器、取开头的条数
+        let preload: Int
+        /// 整条下载的条数（0 = 只取开头）
+        let whole: Int
+    }
+
+    nonisolated static func plan(cellular: Bool, wifiSaver: Bool, cellSaver: Bool, streaming: Bool, limit: Int) -> Plan {
+        let n = min(max(limit, 1), 10)
+        // 关了边下边播：没有「只下开头」这回事，按老办法整条下
+        guard streaming else { return Plan(lowQuality: false, preload: n, whole: n) }
+        if cellular {
+            return cellSaver ? Plan(lowQuality: true, preload: 1, whole: 0) : Plan(lowQuality: false, preload: 2, whole: 2)
+        }
+        return Plan(lowQuality: false, preload: n, whole: wifiSaver ? 0 : n)
+    }
+
+    static var current: Plan {
+        plan(cellular: DYNetPath.shared.cellular, wifiSaver: DYStream.wifiSaverOn, cellSaver: DYStream.saverOn,
+             streaming: DYStream.enabled, limit: DYVideoCache.limit)
     }
 }
 
@@ -274,6 +309,17 @@ final class DYStreamStore: @unchecked Sendable {
     }
 
     func isCurrent(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return currentID == id }
+
+    /// 起播慢诊断（DDWAIT）：这条的边下边播状态——本地有哪些段、哪些在下、允许下到哪、是不是在「饿」
+    func debugLine(forVideo id: String) -> String {
+        guard let e = entry(forVideo: id) else { return "stream=none" }
+        let horizon = self.horizon(e).map { "\($0 / 1024)KB" } ?? "-"
+        let starving = isStarving(id)
+        e.lock.lock(); defer { e.lock.unlock() }
+        func kb(_ r: Range<Int64>) -> String { "\(r.lowerBound / 1024)-\(r.upperBound / 1024)" }
+        let total = e.total.map { "\($0 / 1024)KB" } ?? "?"
+        return "key=\(e.key == e.id ? "hd" : "saver") total=\(total) moovEnd=\(e.mediaStart.map { "\($0 / 1024)KB" } ?? "?") have=[\(e.ranges.map(kb).joined(separator: ","))] inflight=[\(e.inflight.map(kb).joined(separator: ","))] horizon=\(horizon) starving=\(starving) pumping=\(e.pumping) windows=\(e.windows.count)"
+    }
     func position(_ id: String) -> Double? { lock.lock(); defer { lock.unlock() }; return playhead[id] }
 
     func noteFetched(_ n: Int64) { lock.lock(); sessionBytes += n; lock.unlock() }
@@ -490,6 +536,34 @@ final class DYStreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked 
             do { try await download(e, fetch, sink: nil) } catch { return false }
         }
         return false
+    }
+
+    /// 只把开头（预热范围：Wi-Fi 约 6 秒）下好。整条预下之前先跑这个，保证后面一两条划到就能起播。
+    /// 11-24 真机：慢起播的 13 条里 9 条当时正在整条下别的视频，下一条的开头被挤得只剩 1 秒左右；
+    /// 看直播时直播流也在抢网速，直播后面那条划到时常常只缓冲了 0.8–1 秒。
+    func fillHead(_ item: DYAweme, remote: URL) async {
+        let key = DYStreamStore.shared.register(item, remote: remote)
+        guard let e = DYStreamStore.shared.entry(key) else { return }
+        do { try await ensureInfo(e) } catch { return }
+        while !Task.isCancelled {
+            // horizon 自己要拿 e.lock（NSLock 不可重入），先在锁外算
+            guard let horizon = DYStreamStore.shared.horizon(e) else { return }
+            e.lock.lock()
+            guard let total = e.total else { e.lock.unlock(); return }
+            let limit = min(total, horizon)
+            let need = DYStreamPlan.contiguous(from: 0, in: e.ranges)
+            if need >= limit { e.lock.unlock(); return }
+            var end = min(limit, need + DYStreamPlan.chunkBytes)
+            if let next = DYStreamPlan.nextCachedStart(after: need, in: e.ranges) { end = min(end, next) }
+            let fetch = need..<end
+            let busy = e.inflight.contains { $0.overlaps(fetch) }
+            if !busy { e.inflight.append(fetch) }
+            e.lock.unlock()
+            // 播放器（预热的那个）正在要这段：等它下完再看
+            if busy { try? await Task.sleep(for: .milliseconds(150)); continue }
+            defer { e.lock.lock(); e.inflight.removeAll { $0 == fetch }; e.lock.unlock() }
+            do { try await download(e, fetch, sink: nil) } catch { return }
+        }
     }
 
     func resourceLoader(_ loader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource req: AVAssetResourceLoadingRequest) -> Bool {

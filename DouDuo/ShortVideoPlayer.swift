@@ -147,6 +147,8 @@ final class DDPlayback {
         }
         let keepSession = Self.bgPlay || retainers.contains { $0() }
         if !keepSession {
+            if Thread.isMainThread { MainActor.assumeIsolated { DDAudioKeepAlive.release() } }
+            else { DispatchQueue.main.sync { MainActor.assumeIsolated { DDAudioKeepAlive.release() } } }
             DDAudioSessionGuard.allowDeactivate {
                 try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
@@ -364,6 +366,8 @@ struct DYHoldBoostArea: ViewModifier {
 
 struct PlayerPage: View {
     @Environment(\.dyRestrictsPlaybackToPane) private var restrictsPlaybackToPane
+    /// 半折叠下半屏是触控板：弹幕改到触控板上飘，画面上不画（DYTouchpad.swift）
+    @Environment(\.dyTouchpadEngaged) private var touchpadEngaged
 
     private var playbackSafeAreaEdges: Edge.Set {
         restrictsPlaybackToPane ? [] : .all
@@ -638,7 +642,7 @@ struct PlayerPage: View {
                     .animation(commentReduceMotion ? nil : .snappy, value: showsVideoAboveComments)
                 }
             }
-            if !cleanScreen && isActive && (!danmaku.isEmpty || dmStress) {
+            if !cleanScreen && isActive && !touchpadEngaged && (!danmaku.isEmpty || dmStress) {
                 DYDanmakuLayer(items: danmaku, clock: dmClock, topInset: topInset)
             }
             // 手势层铺满整页（含视频上下黑边）：横滑快进 / 单击 / 双击 / 长按，竖滑漏给分页
@@ -752,6 +756,7 @@ struct PlayerPage: View {
                                        playsInsideCover: playsInsideCover, coverLevel: coverLevel)
         }
         .onDisappear {
+            releaseTouchpad()
             if playbackIsActive { DYLiveModel.log("DDB13 disappear \(id.suffix(6)) at=\(String(format: "%.2f", DDNowPlaying.time))") }
             DDNowPlaying.release(playbackID, whilePlaying: playbackIsActive)
             playbackIsActive = false
@@ -824,7 +829,9 @@ struct PlayerPage: View {
         // ⚠️ 不能在 current 的 setter 里直接推：setter 常在播放器时间回调里调，那个闭包捕获的是旧的 PlayerPage 副本，
         // 里面的 isActive 是挂回调时的值（预热时 = false）→ 极简模式进度环永远不动（老板 11-21）。
         // onReceive 每次都用当前这一版视图跑，且不会让 PlayerPage 整页重算。
-        .onReceive(clock.$current) { _ in pushRailProgress() }
+        .onReceive(clock.$current) { _ in pushRailProgress(); syncTouchpad() }
+        .onChange(of: touchpadEngaged) { _, _ in syncTouchpad() }
+        .onChange(of: isPlaying) { _, _ in syncTouchpad() }
         .onChange(of: seeking) { _, _ in pushRailProgress() }
         .onChange(of: seekPreview) { _, _ in if seeking { pushRailProgress() } }
         .onChange(of: isActive) { _, active in if !active, rateBoost { handleLongPress(false) } }
@@ -853,6 +860,7 @@ struct PlayerPage: View {
         }
         .onChange(of: isActive) { _, active in
             playbackIsActive = active
+            if active { syncTouchpad() } else { releaseTouchpad() }
             if !active { DDNowPlaying.release(playbackID, whilePlaying: false); handoffPosition = nil }
             if active { DYStreamStore.shared.activate(id, at: initialResumePosition ?? 0) }
             if !active {
@@ -892,7 +900,8 @@ struct PlayerPage: View {
                 // 先开播：已缓冲够就跳过 AVPlayer 的「评估缓冲速率」等待，直接按目标速率走（抖音同款「零首帧」的关键）
                 DDAudioSessionGate.ensureActive()
                 isPlaying = true
-                if DYPlaybackTelemetry.bufferedAhead(p) >= 1.5, p.currentItem?.status == .readyToPlay,
+                // 有 1 秒就直接播（原 1.5 秒）：不够时系统会先「攒够再播」，1–1.5 秒那几条白等 1 秒多（11-24 真机日志）
+                if DYPlaybackTelemetry.bufferedAhead(p) >= 1.0, p.currentItem?.status == .readyToPlay,
                    seamAudio.mode == .fallbackAVPlayer || seamAudio.mode == .noAudio {
                     p.isMuted = seamAudio.mode == .noAudio || muted
                     p.playImmediately(atRate: playRate)
@@ -901,6 +910,7 @@ struct PlayerPage: View {
                 DYSwipeProbe.rate()
                 let shown = firstFrame
                 telemetry.begin(p, id: id, duration: knownDuration)
+                kickIfOverCautious(p)
                 DYLiveModel.log("DDFRAME \(id) shown=\(shown) t=\(String(format: "%.2f", p.currentTime().seconds)) audio=\(seamAudio.mode)")
                 #if DEBUG
                 logSwipeStart(p)
@@ -982,6 +992,60 @@ struct PlayerPage: View {
         }
     }
 
+    // MARK: 手势（视频区和半折叠触控板共用）
+
+    private func unlockBoost() {
+        lockedBoost = false; rateBoost = false
+        if let v = vlc { v.setRate(Float(liveRate)) }
+        else if isPlaying { seamAudio.setRate(Float(liveRate)) } else { seamAudio.pause() }
+    }
+
+    private func beginSeekGesture() {
+        guard duration > 0 else { return }
+        if let v = vlc { current = v.current }
+        else if let aSec = seamAudio.currentMediaTime { current = aSec }
+        else if let p = player { current = p.currentTime().seconds } else { return }
+        holdAnchor = current
+        seekPreview = current
+        seeking = true
+    }
+
+    private func changeSeekGesture(_ dx: CGFloat, _ w: CGFloat) {
+        guard duration > 0, seeking else { return }
+        seekPreview = max(0, min(duration, holdAnchor + dx / max(w, 1) * duration * 0.9))
+        seekDelta = seekPreview - current
+        requestPreview(seekPreview)
+    }
+
+    private func endSeekGesture() {
+        if seeking { seekTo(seekPreview); seeking = false; previewImage = nil }
+    }
+
+    /// 当前条把操作交给半折叠触控板，触控板显示时把弹幕推过去
+    private func syncTouchpad() {
+        guard isActive else { return }
+        let link = DYTouchpadLink.shared
+        if link.player?.owner != playbackID {
+            link.attach(.init(owner: playbackID,
+                              seekBegan: { beginSeekGesture() },
+                              seekChanged: { changeSeekGesture($0, $1) },
+                              seekEnded: { endSeekGesture() },
+                              boost: { handleLongPress($0) },
+                              lockBoost: { lockedBoost = true },
+                              unlockBoost: { unlockBoost() }))
+        }
+        if touchpadEngaged, !cleanScreen {
+            DYTouchpadDanmaku.shared.publish(owner: playbackID, items: danmaku, clock: dmClock)
+        } else {
+            DYTouchpadDanmaku.shared.clear(playbackID)
+        }
+    }
+
+    private func releaseTouchpad() {
+        DYTouchpadLink.shared.detach(playbackID)
+        DYTouchpadDanmaku.shared.clear(playbackID)
+    }
+
     // MARK: 手势（UIKit 宿主：起手定方向，竖向优先让给分页）
 
     private var gestures: some View {
@@ -992,32 +1056,11 @@ struct PlayerPage: View {
             // 下滑：锁住本条视频的 2 倍速（不写设置、不影响下一条）
             onLongPressLock: { lockedBoost = true },
             // 上滑：立刻取消倍速，回到设置里的速度
-            onLongPressUnlock: {
-                lockedBoost = false; rateBoost = false
-                if let v = vlc { v.setRate(Float(liveRate)) }
-                else if isPlaying { seamAudio.setRate(Float(liveRate)) } else { seamAudio.pause() }
-            },
+            onLongPressUnlock: { unlockBoost() },
             onContextMenu: onContextMenu,
-            onSeekBegan: {
-                guard duration > 0 else { return }
-                if let v = vlc { current = v.current }
-                else if let aSec = seamAudio.currentMediaTime { current = aSec }
-                else if let p = player { current = p.currentTime().seconds } else { return }
-                holdAnchor = current
-                seekPreview = current
-                seeking = true
-            },
-            onSeekChanged: { dx, w in
-                guard duration > 0, seeking else { return }
-                seekPreview = max(0, min(duration, holdAnchor + dx / max(w, 1) * duration * 0.9))
-                seekDelta = seekPreview - current
-                requestPreview(seekPreview)
-            },
-            onSeekEnded: {
-                #if DEBUG
-                    #endif
-                if seeking { seekTo(seekPreview); seeking = false; previewImage = nil }
-            },
+            onSeekBegan: { beginSeekGesture() },
+            onSeekChanged: { dx, w in changeSeekGesture(dx, w) },
+            onSeekEnded: { endSeekGesture() },
             verticalFirst: true,
             onHorizontalSwipe: navigationSwipes && onHorizontalDrag == nil ? { left in
                 if left { onSwipeLeft?() } else { onSwipeRight?() }
@@ -1567,6 +1610,25 @@ struct PlayerPage: View {
     /// 失焦/切后台：短视频立即暂停。音频会话由 DDPlayback 统一释放，
     /// 避免把仍在出声的直播会话一起拆掉。「后台播放」打开时这里直接返回。
     /// 应该在播（当前条、没被用户暂停、能控制播放）却 rate=0：多半是别的播放器把音频会话关了，重新激活接着播
+    /// 起播「过度谨慎」兜底（老板 11-24：划到后停在第一帧 2–4 秒）。
+    /// 真机 DDWAIT：已缓冲 9–29 秒、st=readyToPlay、rate=1，可 AVPlayer 还在 waitingToMinimizeStalls——
+    /// 它按边下边播「一段一段到」估出来的下载速度判断会卡，于是一直不肯起播，最后 2.8–3.8 秒才放行。
+    /// 缓冲已经够 2 秒以上就别等它的估算：直接 playImmediately（真不够时它会正常进缓冲，不会出错）。
+    private func kickIfOverCautious(_ p: AVPlayer) {
+        for delay in [0.25, 0.6, 1.2] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard player === p, isActive, isPlaying, !userPaused, vlc == nil,
+                      p.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                      p.reasonForWaitingToPlay == .toMinimizeStalls,
+                      p.currentItem?.status == .readyToPlay else { return }
+                let buf = DYPlaybackTelemetry.bufferedAhead(p)
+                guard buf >= 2 else { return }
+                p.playImmediately(atRate: playRate)
+                DYLiveModel.log("DDKICK \(id.suffix(6)) +\(delay)s buf=\(String(format: "%.1f", buf))s 跳过「怕卡」等待直接起播")
+            }
+        }
+    }
+
     private func resumeIfStolen(reason: String = "tick") {
         guard vlc == nil, let p = player, canControlPlayback, isPlaying, !userPaused else { return }
         guard p.rate == 0, p.currentItem?.status == .readyToPlay else { return }
