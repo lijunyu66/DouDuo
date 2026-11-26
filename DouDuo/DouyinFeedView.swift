@@ -4133,18 +4133,29 @@ struct DYUpstreamVideoPage: View {
                 .animation(.easeOut(duration: 0.15), value: boost.boosting)
             } else {
                 // 默认：PR #12 之前的布局，左下信息 + 右侧按钮栏
-                HStack(alignment: .bottom, spacing: 12) {
-                    info(fg)
-                    Spacer(minLength: 0)
-                    actions(fg)
-                        .offset(x: DYDuoMetrics.actionRailHorizontalOffset(
-                            isRegular: hSize == .regular, trailingInset: systemColumnInset,
-                            columnWidth: actionColumnWidth, outerPadding: chromeSidePadding,
-                            opticalLeadingInset: theme.media.expandedRailOpticalInset))
-                        .modifier(DYRailReservedNudge())
-                        .offset(x: hSize == .compact ? -9 : 0)
-                        // fork 改动：贴底时去掉操作栏的 56pt 抬高
-                        .padding(.bottom, item.images.isEmpty && !railFlushBottom ? 56 : 0)
+                // fork 改动（机主反馈）：竖屏时改为「信息在上、操作栏横置在最下方」，不挡视频右侧画面；横屏仍用右侧竖排。
+                Group {
+                    if isPortraitPhone && onBack == nil {
+                        VStack(alignment: .leading, spacing: 10) {
+                            info(fg)
+                            actionsHorizontal(fg)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                        }
+                    } else {
+                        HStack(alignment: .bottom, spacing: 12) {
+                            info(fg)
+                            Spacer(minLength: 0)
+                            actions(fg)
+                                .offset(x: DYDuoMetrics.actionRailHorizontalOffset(
+                                    isRegular: hSize == .regular, trailingInset: systemColumnInset,
+                                    columnWidth: actionColumnWidth, outerPadding: chromeSidePadding,
+                                    opticalLeadingInset: theme.media.expandedRailOpticalInset))
+                                .modifier(DYRailReservedNudge())
+                                .offset(x: hSize == .compact ? -9 : 0)
+                                // fork 改动：贴底时去掉操作栏的 56pt 抬高
+                                .padding(.bottom, item.images.isEmpty && !railFlushBottom ? 56 : 0)
+                        }
+                    }
                 }
                 .padding(.horizontal, chromeSidePadding)
                 // fork 改动：贴底时底部额外留白 36 → 4；竖屏再下沉 20pt（railBottomPadding）
@@ -4280,6 +4291,43 @@ struct DYUpstreamVideoPage: View {
         .padding(.horizontal, hSize == .compact ? 9 : 0)
     }
 
+    /// 操作栏的按钮组（赞 / 评论 / 收藏 / 搜索 / 铺满切换），竖排与竖屏横排共用同一组按钮。
+    @ViewBuilder
+    private func railActionItems(_ fg: Color) -> some View {
+        railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
+                 tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)
+        railItem("ellipsis.bubble", DYFormat.count(item.stats.comment), tint: fg, "douyin.comments", onComments)
+        railItem(collected ? "star.fill" : "star", DYFormat.count(item.stats.collect + (collected ? 1 : 0)),
+                 tint: collected ? theme.status.warning.color(for: scheme) : fg, "douyin.collect", onCollect)
+        if !chromeMode.usesRail {
+            railItem("magnifyingglass", "", tint: fg, "douyin.search", onSearch)
+        }
+        if item.images.isEmpty {
+            // 有些视频铺满后会裁掉边缘，随手切回完整画面
+            // 颜色不变，靠图标形态区分：铺满中 = 向内箭头（点了缩回完整画面）；完整画面 = 向外箭头（点了放大铺满）
+            railItem(autoFit ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right", "", tint: fg,
+                     "douyin.fit") {
+                autoFit.toggle()
+                onToast?(autoFit ? "铺满：开" : "完整画面")
+            }
+        }
+    }
+
+    /// fork 新增（机主反馈）：竖屏横置操作栏——同一组按钮横排成一条玻璃胶囊，右侧跟一颗「更多」圆按钮，
+    /// 整排贴在屏幕最下方，不再竖在视频右侧挡画面（尤其是竖屏看横屏视频时）。
+    private func actionsHorizontal(_ fg: Color) -> some View {
+        HStack(spacing: theme.media.actionGroupSpacing) {
+            HStack(spacing: 2) {
+                railActionItems(fg)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 58)
+            .ddMediaGlassCapsule()
+            moreMenu(fg)
+        }
+        .themeShadow(.mediaLabel)
+    }
+
     private func actions(_ fg: Color) -> some View {
         VStack(spacing: theme.media.actionGroupSpacing) {
             if let onBack {
@@ -4305,23 +4353,7 @@ struct DYUpstreamVideoPage: View {
                 .accessibilityIdentifier(backIdentifier)
             }
             VStack(spacing: theme.media.actionItemSpacing) {
-                railItem(liked ? "heart.fill" : "heart", DYFormat.count(item.stats.digg + (liked ? 1 : 0)),
-                         tint: liked ? theme.status.danger.color(for: scheme) : fg, "douyin.like", onLike)
-                railItem("ellipsis.bubble", DYFormat.count(item.stats.comment), tint: fg, "douyin.comments", onComments)
-                railItem(collected ? "star.fill" : "star", DYFormat.count(item.stats.collect + (collected ? 1 : 0)),
-                         tint: collected ? theme.status.warning.color(for: scheme) : fg, "douyin.collect", onCollect)
-                if !chromeMode.usesRail {
-                    railItem("magnifyingglass", "", tint: fg, "douyin.search", onSearch)
-                }
-                if item.images.isEmpty {
-                    // 有些视频铺满后会裁掉边缘，随手切回完整画面
-                    // 颜色不变，靠图标形态区分：铺满中 = 向内箭头（点了缩回完整画面）；完整画面 = 向外箭头（点了放大铺满）
-                    railItem(autoFit ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right", "", tint: fg,
-                             "douyin.fit") {
-                        autoFit.toggle()
-                        onToast?(autoFit ? "铺满：开" : "完整画面")
-                    }
-                }
+                railActionItems(fg)
             }
             .padding(.vertical, 8)
             .frame(width: railWidth)
